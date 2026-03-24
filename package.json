@@ -1,0 +1,14 @@
+{
+  "name": "sb-document-converter",
+  "version": "1.0.0",
+  "dependencies": {
+    "node-fetch": "^2.7.0",
+    "exceljs": "^4.4.0",
+    "xlsx": "^0.18.5",
+    "mammoth": "^1.6.0",
+    "docx": "^8.5.0",
+    "pptxgenjs": "^3.12.0",
+    "pdf-lib": "^1.17.1",
+    "jszip": "^3.10.1"
+  }
+}
