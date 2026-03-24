@@ -1,0 +1,221 @@
+# SB Procesmanagement — Excel Huisstijl Engine
+# Gebaseerd op het perfecte SB referentiebestand
+
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+import re, io
+
+# SB Huisstijl kleuren
+DARK    = "222222"  # Antraciet
+ORANGE  = "FE9933"  # Oranje
+WHITE   = "FFFFFF"  # Wit
+LIGHT   = "F5F5F5"  # Lichtgrijs
+DARK2   = "444444"  # Donkergrijs alternatief
+YELLOW  = "FFFDE7"  # Lichtgeel (formule cellen)
+
+def shift_formula(formula, row_shift):
+    """Verschuif alle relatieve rijreferenties in een Excel formule."""
+    if not formula or not isinstance(formula, str) or not formula.startswith('='):
+        return formula
+    result = []
+    i = 0
+    in_string = False
+    while i < len(formula):
+        if formula[i] == '"':
+            in_string = not in_string
+            result.append(formula[i]); i += 1; continue
+        if in_string:
+            result.append(formula[i]); i += 1; continue
+        if formula[i] == "'":
+            j = i + 1
+            while j < len(formula) and formula[j] != "'":
+                j += 1
+            result.append(formula[i:j+1]); i = j + 1; continue
+        m = re.match(r'(\$?)([A-Z]+)(\$?)(\d+)', formula[i:])
+        if m:
+            dollar_col, col_letters, dollar_row, row_num = m.group(1), m.group(2), m.group(3), int(m.group(4))
+            if not dollar_row:
+                row_num += row_shift
+            result.append(f"{dollar_col}{col_letters}{dollar_row}{row_num}")
+            i += len(m.group(0))
+        else:
+            result.append(formula[i]); i += 1
+    return ''.join(result)
+
+def apply_sb_style(input_bytes):
+    """
+    Pas SB-huisstijl toe op een Excel bestand.
+    Input: bytes van het Excel bestand
+    Output: bytes van het gestylde Excel bestand
+    """
+    wb = load_workbook(io.BytesIO(input_bytes))
+    ROW_SHIFT = 2  # Header rij + oranje streep
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        max_col = ws.max_column
+        max_row = ws.max_row
+
+        # ── STAP 1: Verschuif formules VOOR insert_rows ──
+        formulas = {}
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.value and isinstance(cell.value, str) and cell.value.startswith('='):
+                    formulas[(cell.row, cell.column)] = shift_formula(cell.value, ROW_SHIFT)
+
+        # ── STAP 2: Voeg 2 rijen in bovenaan ──
+        ws.insert_rows(1, ROW_SHIFT)
+
+        # ── STAP 3: Schrijf verschoven formules terug ──
+        for (orig_row, col), new_formula in formulas.items():
+            ws.cell(row=orig_row + ROW_SHIFT, column=col).value = new_formula
+
+        # ── STAP 4: Rij 1 — SB header (antraciet + Impact wit) ──
+        ws.row_dimensions[1].height = 40
+        ws.cell(row=1, column=1).value = f"SB PROCESMANAGEMENT  |  {sheet_name}"
+        for col in range(1, max_col + 1):
+            cell = ws.cell(row=1, column=col)
+            if col > 1: cell.value = None
+            cell.font      = Font(name='Impact', size=14, color=WHITE)
+            cell.fill      = PatternFill("solid", fgColor=DARK)
+            cell.alignment = Alignment(horizontal='left', vertical='center')
+        try:
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_col)
+        except: pass
+
+        # ── STAP 5: Rij 2 — oranje streep ──
+        ws.row_dimensions[2].height = 4
+        for col in range(1, max_col + 1):
+            cell = ws.cell(row=2, column=col)
+            cell.value = None
+            cell.fill  = PatternFill("solid", fgColor=ORANGE)
+        try:
+            ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=max_col)
+        except: pass
+
+        # ── STAP 6: Detecteer originele rij 1 (nu rij 3) ──
+        row3_vals = [ws.cell(row=3, column=c).value for c in range(1, max_col + 1)]
+        has_col_headers = any(
+            v for v in row3_vals
+            if v and isinstance(v, str) and not v.startswith('=') and len(str(v).strip()) > 0
+        )
+
+        if has_col_headers:
+            # Rij 3 = kolomkoppen → donker met witte tekst
+            ws.row_dimensions[3].height = 22
+            for col in range(1, max_col + 1):
+                cell = ws.cell(row=3, column=col)
+                cell.font      = Font(name='Aptos', bold=True, size=10, color=WHITE)
+                cell.fill      = PatternFill("solid", fgColor=DARK)
+                cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+            data_start = 4
+        else:
+            # Rij 3 = metainfo (Datum, Ingevuld door, Scope) → lichtgrijs
+            meta_rows = [3, 4, 5]
+            meta_labels = {}
+            for r in meta_rows:
+                for c in range(1, max_col + 1):
+                    v = ws.cell(row=r, column=c).value
+                    if v and isinstance(v, str) and v.strip():
+                        meta_labels[(r, c)] = v
+
+            for r in meta_rows:
+                ws.row_dimensions[r].height = 18
+                for col in range(1, max_col + 1):
+                    cell = ws.cell(row=r, column=col)
+                    cell.fill = PatternFill("solid", fgColor=LIGHT)
+                    is_label = (r, col) in meta_labels
+                    cell.font = Font(
+                        name='Aptos', bold=is_label, size=10,
+                        color=DARK
+                    )
+                    if is_label:
+                        cell.alignment = Alignment(horizontal='left', vertical='center')
+
+            # Lege rij na metainfo
+            sep_row = max(meta_rows) + 1
+            ws.row_dimensions[sep_row].height = 6
+            for col in range(1, max_col + 1):
+                ws.cell(row=sep_row, column=col).fill = PatternFill("solid", fgColor=LIGHT)
+
+            # Kolomkoppen op rij na separator
+            header_row = sep_row + 1
+            ws.row_dimensions[header_row].height = 22
+            for col in range(1, max_col + 1):
+                cell = ws.cell(row=header_row, column=col)
+                if cell.value:
+                    cell.font      = Font(name='Aptos', bold=True, size=9, color=WHITE)
+                    cell.fill      = PatternFill("solid", fgColor=DARK)
+                    cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            data_start = header_row + 1
+
+        # ── STAP 7: Data rijen — afwisselende SB-opmaak ──
+        new_max_row = max_row + ROW_SHIFT
+        for row_idx in range(data_start, new_max_row + 1):
+            is_odd = (row_idx - data_start) % 2 == 0
+            row_bg = LIGHT if is_odd else WHITE
+
+            first_val = ws.cell(row=row_idx, column=1).value
+            is_numbered = (
+                first_val is not None and
+                isinstance(first_val, (int, float)) and
+                not isinstance(first_val, bool) and
+                str(first_val).replace('.0','').isdigit()
+            )
+
+            for col in range(1, max_col + 1):
+                cell = ws.cell(row=row_idx, column=col)
+                val  = cell.value
+                is_formula = isinstance(val, str) and val.startswith('=')
+
+                if col == 1 and is_numbered:
+                    # Nummering kolom: afwisselend oranje / donkergrijs
+                    cell.fill      = PatternFill("solid", fgColor=ORANGE if is_odd else DARK2)
+                    cell.font      = Font(name='Aptos', bold=True, size=10, color=WHITE)
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                elif is_formula:
+                    # Formule cellen: lichtgeel achtergrond
+                    cell.fill      = PatternFill("solid", fgColor=YELLOW)
+                    cell.font      = Font(name='Aptos', size=9, color=DARK)
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                elif col == 2 and is_numbered:
+                    # Label kolom naast nummer
+                    cell.fill      = PatternFill("solid", fgColor=row_bg)
+                    cell.font      = Font(name='Aptos', bold=True, size=9, color=DARK)
+                    cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+                else:
+                    # Gewone data cel
+                    cell.fill      = PatternFill("solid", fgColor=row_bg)
+                    cell.font      = Font(name='Aptos', size=9, color=DARK)
+                    cell.alignment = Alignment(
+                        horizontal='left',
+                        vertical='top' if is_numbered else 'center',
+                        wrap_text=True
+                    )
+
+        # ── STAP 8: Laatste rij — totaalrij styling ──
+        last_row = new_max_row
+        last_val = ws.cell(row=last_row, column=1).value
+        if last_val and isinstance(last_val, str) and len(str(last_val)) > 3:
+            # Totaalrij: donker antraciet
+            ws.row_dimensions[last_row].height = 32
+            for col in range(1, max_col + 1):
+                cell = ws.cell(row=last_row, column=col)
+                cell.fill = PatternFill("solid", fgColor=DARK)
+                cell.font = Font(name='Impact', size=12, color=WHITE if col == 1 else ORANGE)
+                cell.alignment = Alignment(horizontal='center' if col > 1 else 'left', vertical='center')
+
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+if __name__ == "__main__":
+    with open('/mnt/user-data/uploads/Rapid_plant_assessment_-_moet_op_printbare_A4_zoals_veiligheidscheck_-_alleen_het_deel_dat_je_invult_tijdens_de_check.xlsx', 'rb') as f:
+        input_bytes = f.read()
+    
+    result = apply_sb_style(input_bytes)
+    
+    with open('/mnt/user-data/outputs/RPA_SB_universeel.xlsx', 'wb') as f:
+        f.write(result)
+    print("Klaar!")
