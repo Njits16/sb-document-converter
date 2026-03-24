@@ -1,22 +1,11 @@
 const fetch = require("node-fetch");
-const XLSX = require("xlsx");
 const ExcelJS = require("exceljs");
+const mammoth = require("mammoth");
 const { Document, Paragraph, TextRun, HeadingLevel, Packer } = require("docx");
 const PptxGenJS = require("pptxgenjs");
 const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
 const JSZip = require("jszip");
 
-// ── SB HUISSTIJL KLEUREN ──
-const SB = {
-  DARK:   "FF222222",
-  ORANGE: "FFFE9933",
-  WHITE:  "FFFFFFFF",
-  LIGHT:  "FFF5F5F5",
-  DARK2:  "FF444444",
-  YELLOW: "FFFFDE7",
-};
-
-// ── FORMULE SHIFTER ──
 function shiftFormula(formula, rowShift) {
   if (!formula || typeof formula !== "string" || !formula.startsWith("=")) return formula;
   const result = [];
@@ -43,11 +32,8 @@ function shiftFormula(formula, rowShift) {
   return result.join("");
 }
 
-// ── SB EXCEL STYLING ENGINE ──
 async function applyExcelStyle(inputBuffer) {
   const ROW_SHIFT = 2;
-
-  // Lees het originele bestand met ExcelJS (behoudt formules)
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(inputBuffer);
 
@@ -55,7 +41,19 @@ async function applyExcelStyle(inputBuffer) {
     const maxRow = worksheet.rowCount;
     const maxCol = worksheet.columnCount;
 
-    // ── STAP 1: Verzamel en verschuif alle formules ──
+    // Sla rijhoogtes en kolombreedtes op VOOR verschuiven
+    const rowHeights = {};
+    for (let r = 1; r <= maxRow; r++) {
+      const h = worksheet.getRow(r).height;
+      if (h) rowHeights[r] = h;
+    }
+    const colWidths = {};
+    for (let c = 1; c <= maxCol; c++) {
+      const w = worksheet.getColumn(c).width;
+      if (w) colWidths[c] = w;
+    }
+
+    // Verzamel en verschuif alle formules
     const formulas = {};
     worksheet.eachRow((row, rowNum) => {
       row.eachCell({ includeEmpty: false }, (cell, colNum) => {
@@ -65,12 +63,10 @@ async function applyExcelStyle(inputBuffer) {
       });
     });
 
-    // ── STAP 2: Verschuif bestaande rijen 2 naar beneden ──
-    // Kopieer alle rijen van onder naar boven om te voorkomen dat data overschreven wordt
+    // Verschuif rijen naar beneden (van onder naar boven)
     for (let r = maxRow; r >= 1; r--) {
       const srcRow = worksheet.getRow(r);
       const dstRow = worksheet.getRow(r + ROW_SHIFT);
-
       srcRow.eachCell({ includeEmpty: true }, (cell, colNum) => {
         const dstCell = dstRow.getCell(colNum);
         if (cell.formula) {
@@ -78,28 +74,24 @@ async function applyExcelStyle(inputBuffer) {
         } else {
           dstCell.value = cell.value;
         }
-        dstCell.style = JSON.parse(JSON.stringify(cell.style));
+        try { dstCell.style = JSON.parse(JSON.stringify(cell.style)); } catch(e) {}
       });
-      dstRow.height = srcRow.height;
+      // Herstel rijhoogte op nieuwe positie
+      if (rowHeights[r]) dstRow.height = rowHeights[r];
     }
 
-    // Wis originele rijen 1 en 2
+    // Wis rijen 1 en 2
     for (let r = 1; r <= ROW_SHIFT; r++) {
       const row = worksheet.getRow(r);
-      row.eachCell({ includeEmpty: true }, (cell) => {
-        cell.value = null;
-        cell.style = {};
-      });
+      row.eachCell({ includeEmpty: true }, (cell) => { cell.value = null; cell.style = {}; });
     }
 
-    // ── STAP 3: Kolombreedtes instellen ──
-    // Bewaar bestaande breedtes maar stel kolom A smaller in als er nummering is
-    const colAWidth = worksheet.getColumn(1).width;
-    if (!colAWidth || colAWidth > 10) {
-      worksheet.getColumn(1).width = 6;
+    // Herstel kolombreedtes
+    for (let c = 1; c <= maxCol; c++) {
+      if (colWidths[c]) worksheet.getColumn(c).width = colWidths[c];
     }
 
-    // ── STAP 4: Rij 1 — SB header ──
+    // Rij 1: SB header
     const headerRow = worksheet.getRow(1);
     headerRow.height = 40;
     const headerCell = headerRow.getCell(1);
@@ -107,15 +99,13 @@ async function applyExcelStyle(inputBuffer) {
     headerCell.font = { name: "Impact", size: 14, color: { argb: "FFFFFFFF" }, bold: false };
     headerCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF222222" } };
     headerCell.alignment = { horizontal: "left", vertical: "middle" };
-
-    // Kleur alle cellen in rij 1 donker
     for (let c = 2; c <= maxCol; c++) {
       const cell = headerRow.getCell(c);
       cell.value = null;
       cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF222222" } };
     }
 
-    // ── STAP 5: Rij 2 — oranje streep ──
+    // Rij 2: oranje streep
     const orangeRow = worksheet.getRow(2);
     orangeRow.height = 4;
     for (let c = 1; c <= maxCol; c++) {
@@ -124,7 +114,7 @@ async function applyExcelStyle(inputBuffer) {
       cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFE9933" } };
     }
 
-    // ── STAP 6: Detecteer rij 3 — metainfo of kolomkoppen ──
+    // Detecteer rij 3: metainfo of kolomkoppen
     const row3 = worksheet.getRow(3);
     const row3Vals = [];
     for (let c = 1; c <= maxCol; c++) {
@@ -137,7 +127,6 @@ async function applyExcelStyle(inputBuffer) {
     let dataStart;
 
     if (hasMetaInfo) {
-      // Rijen 3-5: metainfo (lichtgrijs)
       for (let r = 3; r <= 5; r++) {
         const row = worksheet.getRow(r);
         row.height = 18;
@@ -149,15 +138,13 @@ async function applyExcelStyle(inputBuffer) {
           if (hasVal) cell.alignment = { horizontal: "left", vertical: "middle" };
         }
       }
-      // Rij 6: lege spacer
       const spacer = worksheet.getRow(6);
       spacer.height = 6;
       for (let c = 1; c <= maxCol; c++) {
         spacer.getCell(c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF5F5F5" } };
       }
-      // Rij 7: kolomkoppen
       const colHeaderRow = worksheet.getRow(7);
-      colHeaderRow.height = 55;
+      colHeaderRow.height = rowHeights[5] || 55;
       for (let c = 1; c <= maxCol; c++) {
         const cell = colHeaderRow.getCell(c);
         if (cell.value) {
@@ -166,7 +153,6 @@ async function applyExcelStyle(inputBuffer) {
           cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
         }
       }
-      // Rij 8: scorewaarden rij (oranje)
       const scoreRow = worksheet.getRow(8);
       scoreRow.height = 18;
       for (let c = 1; c <= maxCol; c++) {
@@ -180,7 +166,7 @@ async function applyExcelStyle(inputBuffer) {
       dataStart = 9;
     } else if (hasColHeaders) {
       const colHeaderRow = worksheet.getRow(3);
-      colHeaderRow.height = 22;
+      colHeaderRow.height = rowHeights[1] || 22;
       for (let c = 1; c <= maxCol; c++) {
         const cell = colHeaderRow.getCell(c);
         cell.font = { name: "Aptos", size: 10, bold: true, color: { argb: "FFFFFFFF" } };
@@ -192,7 +178,7 @@ async function applyExcelStyle(inputBuffer) {
       dataStart = 3;
     }
 
-    // ── STAP 7: Data rijen ──
+    // Data rijen: afwisselende SB-opmaak
     const newMaxRow = maxRow + ROW_SHIFT;
     for (let r = dataStart; r <= newMaxRow; r++) {
       const row = worksheet.getRow(r);
@@ -201,14 +187,11 @@ async function applyExcelStyle(inputBuffer) {
 
       const firstVal = row.getCell(1).value;
       const isNumbered = (
-        firstVal !== null &&
-        firstVal !== undefined &&
-        !isNaN(firstVal) &&
-        typeof firstVal !== "boolean" &&
+        firstVal !== null && firstVal !== undefined &&
+        !isNaN(firstVal) && typeof firstVal !== "boolean" &&
         Number.isInteger(Number(firstVal))
       );
 
-      // Check of dit de totaalrij is (laatste rij met tekst in kolom A)
       const isTotal = (r === newMaxRow && firstVal && typeof firstVal === "string" && firstVal.length > 3);
 
       if (isTotal) {
@@ -216,16 +199,11 @@ async function applyExcelStyle(inputBuffer) {
         for (let c = 1; c <= maxCol; c++) {
           const cell = row.getCell(c);
           cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF222222" } };
-          cell.font = {
-            name: "Impact", size: c === 1 ? 12 : 14, bold: c > 1,
-            color: { argb: c === 1 ? "FFFFFFFF" : "FFFE9933" }
-          };
+          cell.font = { name: "Impact", size: c === 1 ? 12 : 14, bold: c > 1, color: { argb: c === 1 ? "FFFFFFFF" : "FFFE9933" } };
           cell.alignment = { horizontal: c === 1 ? "left" : "center", vertical: "middle" };
         }
         continue;
       }
-
-      if (!row.height || row.height < 15) row.height = 30;
 
       for (let c = 1; c <= maxCol; c++) {
         const cell = row.getCell(c);
@@ -253,23 +231,16 @@ async function applyExcelStyle(inputBuffer) {
     }
   }
 
-  // Sla op als buffer
   const buffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(buffer);
 }
 
-// ── CLAUDE API ──
 async function callClaude(apiKey, systemPrompt, text) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
+    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
     body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 4096,
+      model: "claude-haiku-4-5-20251001", max_tokens: 4096,
       system: systemPrompt,
       messages: [{ role: "user", content: `Verwerk het volgende document:\n\n${text}` }],
     }),
@@ -282,28 +253,18 @@ async function callClaude(apiKey, systemPrompt, text) {
   return data.content[0].text;
 }
 
-// ── HOOFDFUNCTIE ──
 exports.handler = async function (event) {
-  if (event.httpMethod !== "POST") {
-    return { statusCode: 405, body: "Method Not Allowed" };
-  }
+  if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method Not Allowed" };
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return { statusCode: 500, body: JSON.stringify({ error: "API-key niet geconfigureerd op de server." }) };
-  }
+  if (!apiKey) return { statusCode: 500, body: JSON.stringify({ error: "API-key niet geconfigureerd op de server." }) };
 
   let body;
-  try {
-    body = JSON.parse(event.body);
-  } catch {
-    return { statusCode: 400, body: JSON.stringify({ error: "Ongeldig verzoek." }) };
-  }
+  try { body = JSON.parse(event.body); }
+  catch { return { statusCode: 400, body: JSON.stringify({ error: "Ongeldig verzoek." }) }; }
 
   const { fileData, fileType, fileName, options } = body;
-  if (!fileData) {
-    return { statusCode: 400, body: JSON.stringify({ error: "Geen bestandsdata ontvangen." }) };
-  }
+  if (!fileData) return { statusCode: 400, body: JSON.stringify({ error: "Geen bestandsdata ontvangen." }) };
 
   const inputBuffer = Buffer.from(fileData, "base64");
   const baseName = (fileName || "document").replace(/\.[^.]+$/, "");
@@ -312,26 +273,20 @@ exports.handler = async function (event) {
     let fileBuffer, mimeType, outputFileName;
 
     if (fileType === "xlsx") {
-      // ── EXCEL: Huisstijl toepassen ──
       fileBuffer = await applyExcelStyle(inputBuffer);
       mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
       outputFileName = baseName + "_SB.xlsx";
 
     } else {
-      // ── OVERIGE FORMATEN: Tekst verbeteren via Claude ──
       let text = "";
-
       if (fileType === "docx") {
-        const mammoth = require("mammoth");
         const result = await mammoth.extractRawText({ buffer: inputBuffer });
         text = result.value;
       } else if (fileType === "txt") {
         text = inputBuffer.toString("utf-8");
       } else if (fileType === "pptx") {
         const zip = await JSZip.loadAsync(inputBuffer);
-        const slideFiles = Object.keys(zip.files)
-          .filter(n => n.match(/ppt\/slides\/slide\d+\.xml/))
-          .sort();
+        const slideFiles = Object.keys(zip.files).filter(n => n.match(/ppt\/slides\/slide\d+\.xml/)).sort();
         for (const slideName of slideFiles) {
           const xml = await zip.files[slideName].async("string");
           const matches = xml.match(/<a:t[^>]*>([^<]+)<\/a:t>/g) || [];
@@ -340,14 +295,9 @@ exports.handler = async function (event) {
         }
       }
 
-      // System prompt
       let systemPrompt = "Je bent een document-assistent voor SB Procesmanagement.\n\n";
-      if (options?.style) {
-        systemPrompt += "Pas een professionele, zakelijke toon toe. Gebruik actieve zinnen, heldere kopjes, geen wollige taal.\n\n";
-      }
-      if (options?.improve) {
-        systemPrompt += "Verbeter grammatica, spelling en leesbaarheid.\n\n";
-      }
+      if (options?.style) systemPrompt += "Pas een professionele, zakelijke toon toe. Gebruik actieve zinnen, heldere kopjes.\n\n";
+      if (options?.improve) systemPrompt += "Verbeter grammatica, spelling en leesbaarheid.\n\n";
       if (fileType === "pptx") {
         systemPrompt += "Geef slides terug als:\n=== Slide N ===\nTitel: ...\nInhoud: ...\n\nAlleen slides, geen uitleg.";
       } else {
@@ -400,16 +350,19 @@ exports.handler = async function (event) {
           if (!line.trim()) { y -= 9; continue; }
           const isH = line.startsWith("# ") || line.startsWith("## ");
           const text = line.replace(/^#{1,3} /, "");
+          const usedFont = isH ? boldFont : font;
+          const fontSize = isH ? 14 : 11;
+          const color = isH ? rgb(0.91, 0.51, 0.17) : rgb(0.13, 0.13, 0.13);
           const words = text.split(" ");
           let cur = "";
           for (const word of words) {
             const test = cur ? cur + " " + word : word;
-            if ((isH ? boldFont : font).widthOfTextAtSize(test, isH ? 14 : 11) > width - margin * 2 && cur) {
-              page.drawText(cur, { x: margin, y, size: isH ? 14 : 11, font: isH ? boldFont : font, color: isH ? rgb(0.91, 0.51, 0.17) : rgb(0.13, 0.13, 0.13) });
+            if (usedFont.widthOfTextAtSize(test, fontSize) > width - margin * 2 && cur) {
+              page.drawText(cur, { x: margin, y, size: fontSize, font: usedFont, color });
               y -= 18; cur = word;
             } else { cur = test; }
           }
-          if (cur) { page.drawText(cur, { x: margin, y, size: isH ? 14 : 11, font: isH ? boldFont : font, color: isH ? rgb(0.91, 0.51, 0.17) : rgb(0.13, 0.13, 0.13) }); y -= 18; }
+          if (cur) { page.drawText(cur, { x: margin, y, size: fontSize, font: usedFont, color }); y -= 18; }
         }
         fileBuffer = await pdfDoc.save();
         mimeType = "application/pdf";
